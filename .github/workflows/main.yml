@@ -1,0 +1,107 @@
+name: RDP NGROK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  rdp-setup:
+    runs-on: windows-2025
+    timeout-minutes: 360  # 6 hour max (GitHub Free limit)
+
+    steps:
+    - name: Download and extract Ngrok
+      run: |
+        Invoke-WebRequest "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile ngrok.zip
+        Expand-Archive ngrok.zip -DestinationPath .
+        Remove-Item ngrok.zip -Force
+
+    - name: Authenticate Ngrok
+      run: .\ngrok.exe authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+
+    - name: Enable Remote Desktop
+      run: |
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        New-NetFirewallRule -DisplayName "Allow RDP via Ngrok" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
+
+    - name: Create RDP User
+      run: |
+        net user Ham7Office MyStrong123 /add /Y
+        net localgroup administrators Ham7Office /add
+        reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v Ham7Office /t REG_DWORD /d 0 /f
+
+    - name: Download, Extract, and Fix Permissions
+      run: |
+        $DirectLink = "https://github.com/Wosol33/Tailscale/releases/download/LWR152/librewolf_RDP.rar"
+        $DesktopPath = "C:\Users\Public\Desktop"
+        $Destination = "$DesktopPath\librewolf_RDP.rar"
+        
+        Write-Host "Downloading librewolf_RDP.rar..."
+        Invoke-WebRequest -Uri $DirectLink -OutFile $Destination
+        Write-Host "تم التحميل! جاري فك الضغط..."
+        
+        tar -xf $Destination -C $DesktopPath
+        Remove-Item $Destination -Force
+        
+        Write-Host "جاري تعديل الصلاحيات وإلغاء القراءة فقط..."
+        
+        Get-ChildItem -Path "$DesktopPath" -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.IsReadOnly) { $_.IsReadOnly = $false }
+        }
+        
+        icacls "$DesktopPath\*" /grant "Ham7Office:(OI)(CI)F" /T /C /Q
+        
+        Write-Host "تم فك الضغط وتجهيز الصلاحيات بنجاح على سطح المكتب!"
+
+    - name: Start Ngrok and display connection info
+      run: |
+        # Start Ngrok and capture output
+        Start-Process -FilePath "$pwd\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow -RedirectStandardOutput ngrok.log
+        
+        # Wait for tunnel establishment
+        $timeout = 60
+        $tunnelUrl = $null
+        
+        while ($timeout -gt 0 -and -not $tunnelUrl) {
+          Start-Sleep -Seconds 5
+          $timeout -= 5
+          
+          # Try API first
+          try {
+            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction Stop
+            $tunnelUrl = $response.tunnels[0].public_url -replace "tcp://", ""
+          } catch {
+            # Fallback to log parsing
+            $logContent = Get-Content ngrok.log -ErrorAction SilentlyContinue
+            $tunnelUrl = $logContent | Select-String -Pattern "tcp://([a-zA-Z0-9\.\-]+:\d+)" | ForEach-Object { $_.Matches.Groups[1].Value }
+          }
+        }
+
+        if (-not $tunnelUrl) {
+          Write-Output "::error::Failed to establish Ngrok tunnel after 60 seconds"
+          Write-Output "=== Ngrok Log Contents ==="
+          Get-Content ngrok.log
+          exit 1
+        }
+
+        Write-Output "=========================================="
+        Write-Output "||        RDP CONNECTION DETAILS        ||"
+        Write-Output "=========================================="
+        Write-Output "Address: $tunnelUrl"
+        Write-Output "Username: Ham7Office"
+        Write-Output "Password: MyStrong123"
+        Write-Output "------------------------------------------"
+        Write-Output "1. Open Remote Desktop (Win+R → mstsc)"
+        Write-Output "2. Connect to: $tunnelUrl"
+        Write-Output "3. Use credentials above when prompted"
+        Write-Output "=========================================="
+        Write-Output "Note: This VM will self-destruct after 6 hours"
+        Write-Output "=========================================="
+
+        # Keep alive
+        while ($true) { Start-Sleep -Seconds 300 }
+
+    - name: Force cleanup
+      if: always()
+      run: |
+        Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+        Stop-Process -Name "rdp" -Force -ErrorAction SilentlyContinue
